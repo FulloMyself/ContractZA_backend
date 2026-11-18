@@ -27,7 +27,9 @@ const refreshSecret = required('JWT_REFRESH_SECRET') || 'development-refresh-sec
 const idHashPepper = required('ID_HASH_PEPPER');
 const clientUrl = required('CLIENT_URL') || 'http://localhost:5173';
 const apiUrl = required('API_URL') || 'http://localhost:5000';
-const clientBasePath = (process.env.CLIENT_BASE_PATH || '').replace(/\/+$/, '');
+const clientBasePath = (
+  process.env.CLIENT_BASE_PATH ?? (nodeEnv === 'production' ? '/ContractZA_frontend' : '')
+).replace(/\/+$/, '');
 const refreshDays = Number(process.env.REFRESH_TOKEN_TTL_DAYS || 7);
 const signingDays = Number(process.env.SIGNING_TOKEN_TTL_DAYS || 7);
 const emailProvider = process.env.EMAIL_PROVIDER || '';
