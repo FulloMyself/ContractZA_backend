@@ -54,7 +54,7 @@ async function expireStaleInvitations(owner) {
   const now = new Date();
   for (const contract of contracts) {
     const unsigned = contract.parties.filter((party) => party.role === 'counterparty' && !party.signedAt && !party.declinedAt);
-    if (unsigned.length && unsigned.every((party) => !party.signingExpiresAt || party.signingExpiresAt <= now)) {
+    if (unsigned.length && unsigned.every((party) => !party.signingTokenHash || !party.signingExpiresAt || party.signingExpiresAt <= now)) {
       contract.status = 'expired';
       for (const party of unsigned) party.signingTokenHash = undefined;
       await contract.save();
@@ -152,8 +152,8 @@ router.post('/:id/invite', asyncHandler(async (req, res) => {
   let party = contract.parties.find((item) => item.email === parsed.data.email);
   if (party && party.signedAt) throw new AppError(409, 'This counterparty has already signed.');
   if (!party) {
-    party = { name: parsed.data.name, email: parsed.data.email, role: 'counterparty' };
-    contract.parties.push(party);
+    contract.parties.push({ name: parsed.data.name, email: parsed.data.email, role: 'counterparty' });
+    party = contract.parties[contract.parties.length - 1];
   }
   party.name = parsed.data.name;
   const token = randomToken();
