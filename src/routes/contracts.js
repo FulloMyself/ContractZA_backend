@@ -20,7 +20,13 @@ router.param('id', objectIdParam);
 const contractInput = z.object({
   title: z.string().trim().min(1).max(160),
   body: z.string().trim().min(1).max(100000),
-  template: z.enum(['custom', 'service-agreement', 'nda', 'freelance-agreement']).optional()
+  template: z.enum([
+    'custom', 'service-agreement', 'nda', 'freelance-agreement',
+    'independent-contractor', 'employment-agreement', 'residential-lease',
+    'commercial-lease', 'sale-of-goods', 'loan-agreement',
+    'partnership-agreement', 'shareholders-agreement',
+    'data-processing-agreement', 'settlement-agreement'
+  ]).optional()
 }).strict();
 const emailSchema = z.string().email().max(254).transform((value) => value.toLowerCase().trim());
 

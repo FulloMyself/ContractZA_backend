@@ -16,7 +16,17 @@ const contractSchema = new mongoose.Schema({
   owner: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true, index: true },
   title: { type: String, required: true, trim: true, maxlength: 160 },
   body: { type: String, required: true, maxlength: 100000 },
-  template: { type: String, enum: ['custom', 'service-agreement', 'nda', 'freelance-agreement'], default: 'custom' },
+  template: {
+    type: String,
+    enum: [
+      'custom', 'service-agreement', 'nda', 'freelance-agreement',
+      'independent-contractor', 'employment-agreement', 'residential-lease',
+      'commercial-lease', 'sale-of-goods', 'loan-agreement',
+      'partnership-agreement', 'shareholders-agreement',
+      'data-processing-agreement', 'settlement-agreement'
+    ],
+    default: 'custom'
+  },
   status: { type: String, enum: ['draft', 'pending', 'signed', 'declined', 'expired', 'cancelled'], default: 'draft', index: true },
   parties: [{
     name: { type: String, required: true },
