@@ -33,4 +33,5 @@ const contractSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 contractSchema.index({ owner: 1, updatedAt: -1 });
+contractSchema.index({ 'parties.email': 1, updatedAt: -1 });
 module.exports = mongoose.model('Contract', contractSchema);

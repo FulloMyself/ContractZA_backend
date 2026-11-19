@@ -1,7 +1,6 @@
 'use strict';
 
 const express = require('express');
-const crypto = require('node:crypto');
 const { z } = require('zod');
 const Contract = require('../models/Contract');
 const { authenticate, requireRole } = require('../middleware/auth');
@@ -11,6 +10,8 @@ const { randomToken, hashToken } = require('../utils/crypto');
 const { writeAudit } = require('../services/audit.service');
 const { sendEmail, emailHtml, sendSignatureConfirmation } = require('../services/email');
 const { contractPdf } = require('../services/pdf.service');
+const { signCounterparty } = require('../services/signature.service');
+const { documentHash, signatureImage } = require('../utils/signature');
 const { clientPage } = require('../utils/urls');
 const config = require('../config/env');
 
@@ -23,23 +24,11 @@ const contractInput = z.object({
 }).strict();
 const emailSchema = z.string().email().max(254).transform((value) => value.toLowerCase().trim());
 
-function documentHash(body) {
-  return crypto.createHash('sha256').update(body, 'utf8').digest('hex');
-}
-
-function signatureImage(value) {
-  if (typeof value !== 'string' || value.length > 300000) return false;
-  const match = /^data:image\/png;base64,([A-Za-z0-9+/]+=*)$/.exec(value);
-  if (!match) return false;
-  const image = Buffer.from(match[1], 'base64');
-  return image.length >= 24 && image.length <= 200 * 1024
-    && image.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
-    && image.toString('ascii', 12, 16) === 'IHDR';
-}
-
 function safeContract(contract, owner = false) {
   const result = contract.toObject ? contract.toObject() : contract;
   delete result.__v;
+  delete result.owner;
+  result.isOwner = owner;
   result.parties = result.parties.map(({ signingTokenHash, ...party }) => owner
     ? party
     : (({ name, email, role, signedAt }) => ({ name, email, role, signedAt }))(party));
@@ -47,6 +36,14 @@ function safeContract(contract, owner = false) {
     result.signatures = result.signatures.map(({ name, email, signedAt }) => ({ name, email, signedAt }));
   }
   return result;
+}
+
+function accessibleContracts(user) {
+  return { $or: [{ owner: user._id }, { 'parties.email': user.email }] };
+}
+
+function isOwner(contract, user) {
+  return contract.owner.equals(user._id);
 }
 
 async function expireStaleInvitations(owner) {
@@ -67,26 +64,48 @@ router.use(authenticate, requireRole('user'));
 
 router.get('/stats', asyncHandler(async (req, res) => {
   await expireStaleInvitations(req.user._id);
+  const accessFilter = accessibleContracts(req.user);
   const [counts, recent, pending] = await Promise.all([
-    Contract.aggregate([{ $match: { owner: req.user._id } }, { $group: { _id: '$status', count: { $sum: 1 } } }]),
-    Contract.find({ owner: req.user._id }).sort({ updatedAt: -1 }).limit(5).select('title status updatedAt').lean(),
-    Contract.countDocuments({ owner: req.user._id, status: 'pending' })
+    Contract.aggregate([{ $match: accessFilter }, { $group: { _id: '$status', count: { $sum: 1 } } }]),
+    Contract.find(accessFilter).sort({ updatedAt: -1 }).limit(5).select('title status updatedAt owner'),
+    Contract.countDocuments({ ...accessFilter, status: 'pending' })
   ]);
-  res.json({ stats: Object.fromEntries(counts.map(({ _id, count }) => [_id, count])), pendingSignatures: pending, recent });
+  res.json({
+    stats: Object.fromEntries(counts.map(({ _id, count }) => [_id, count])),
+    pendingSignatures: pending,
+    recent: recent.map((contract) => ({
+      _id: contract._id,
+      title: contract.title,
+      status: contract.status,
+      updatedAt: contract.updatedAt,
+      isOwner: isOwner(contract, req.user)
+    }))
+  });
 }));
 
 router.get('/', asyncHandler(async (req, res) => {
   await expireStaleInvitations(req.user._id);
   const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
   const limit = Math.min(50, Math.max(1, Number.parseInt(req.query.limit, 10) || 10));
-  const filter = { owner: req.user._id };
+  const filter = accessibleContracts(req.user);
   if (['draft', 'pending', 'signed', 'declined', 'expired', 'cancelled'].includes(req.query.status)) filter.status = req.query.status;
   if (req.query.search) filter.title = { $regex: String(req.query.search).slice(0, 100).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), $options: 'i' };
   const [items, total] = await Promise.all([
     Contract.find(filter).sort({ updatedAt: -1 }).skip((page - 1) * limit).limit(limit).select('-body -signatures -parties.signingTokenHash'),
     Contract.countDocuments(filter)
   ]);
-  res.json({ contracts: items, page, limit, total, pages: Math.ceil(total / limit) });
+  res.json({
+    contracts: items.map((contract) => {
+      const result = contract.toObject();
+      result.isOwner = isOwner(contract, req.user);
+      delete result.owner;
+      return result;
+    }),
+    page,
+    limit,
+    total,
+    pages: Math.ceil(total / limit)
+  });
 }));
 
 router.post('/', asyncHandler(async (req, res) => {
@@ -102,7 +121,7 @@ router.post('/', asyncHandler(async (req, res) => {
 }));
 
 router.get('/:id/pdf', asyncHandler(async (req, res) => {
-  const contract = await Contract.findOne({ _id: req.params.id, owner: req.user._id });
+  const contract = await Contract.findOne({ _id: req.params.id, ...accessibleContracts(req.user) });
   if (!contract) throw new AppError(404, 'Contract not found.');
   if (contract.status !== 'signed') throw new AppError(409, 'The completion certificate is available once all parties have signed.');
   const expectedHash = documentHash(contract.body);
@@ -116,9 +135,9 @@ router.get('/:id/pdf', asyncHandler(async (req, res) => {
 }));
 
 router.get('/:id', asyncHandler(async (req, res) => {
-  const contract = await Contract.findOne({ _id: req.params.id, owner: req.user._id });
+  const contract = await Contract.findOne({ _id: req.params.id, ...accessibleContracts(req.user) });
   if (!contract) throw new AppError(404, 'Contract not found.');
-  res.json({ contract: safeContract(contract, true) });
+  res.json({ contract: safeContract(contract, isOwner(contract, req.user)) });
 }));
 
 router.patch('/:id', asyncHandler(async (req, res) => {
@@ -218,6 +237,29 @@ router.post('/:id/sign', asyncHandler(async (req, res) => {
   }
   await writeAudit({ actor: req.user._id, action: 'contract.owner_signed', targetType: 'contract', targetId: String(contract._id), ipAddress: req.ip });
   res.json({ contract: safeContract(signedContract, true) });
+}));
+
+router.post('/:id/sign-as-counterparty', asyncHandler(async (req, res) => {
+  if (!req.user.emailVerified) throw new AppError(403, 'Verify your email address before signing contracts.');
+  const parsed = z.object({ signature: z.string(), name: z.string().trim().min(1).max(160) }).safeParse(req.body);
+  if (!parsed.success || !signatureImage(parsed.data.signature)) throw new AppError(400, 'A valid PNG signature is required.');
+  const contract = await Contract.findOne({
+    _id: req.params.id,
+    status: 'pending',
+    parties: { $elemMatch: { email: req.user.email, role: 'counterparty' } }
+  });
+  const party = contract?.parties.find((item) => item.email === req.user.email && item.role === 'counterparty');
+  if (!contract || !party || party.signedAt || party.declinedAt || !party.signingTokenHash || !party.signingExpiresAt || party.signingExpiresAt <= new Date()) {
+    throw new AppError(404, 'This contract is not awaiting your signature.');
+  }
+  const signedContract = await signCounterparty({
+    contract,
+    request: req,
+    name: parsed.data.name,
+    signature: parsed.data.signature,
+    partyMatch: { email: req.user.email, role: 'counterparty' }
+  });
+  res.json({ contract: safeContract(signedContract, false) });
 }));
 
 module.exports = router;

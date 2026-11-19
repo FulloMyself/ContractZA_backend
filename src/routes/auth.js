@@ -16,12 +16,14 @@ const config = require('../config/env');
 const router = express.Router();
 const passwordField = z.string().min(10, 'Password must be at least 10 characters.').max(128);
 const emailField = z.string().email().max(254).transform((value) => value.toLowerCase().trim());
+const signingReturnTo = z.string().regex(/^\/sign\/[a-f0-9]{64}$/i);
 const registrationSchema = z.object({
   firstName: z.string().trim().min(1).max(80),
   lastName: z.string().trim().min(1).max(80),
   email: emailField,
   password: passwordField,
-  idNumber: z.string().regex(/^\d{13}$/, 'ID number must be exactly 13 digits.')
+  idNumber: z.string().regex(/^\d{13}$/, 'ID number must be exactly 13 digits.'),
+  returnTo: signingReturnTo.optional()
 });
 
 function cookieOptions() {
@@ -74,7 +76,8 @@ router.post('/register', asyncHandler(async (req, res) => {
   });
   await user.setPassword(data.password);
   await user.save();
-  const link = clientPage(`verify-email?token=${encodeURIComponent(token)}`);
+  const returnToQuery = data.returnTo ? `&returnTo=${encodeURIComponent(data.returnTo)}` : '';
+  const link = clientPage(`verify-email?token=${encodeURIComponent(token)}${returnToQuery}`);
   await sendEmail({
     to: user.email,
     subject: 'Verify your Contracts ZAR account',
@@ -100,13 +103,16 @@ router.get('/verify-email', asyncHandler(async (req, res) => {
 
 router.post('/resend-verification', asyncHandler(async (req, res) => {
   const email = String(req.body.email || '').toLowerCase().trim();
+  const returnToResult = req.body.returnTo === undefined ? null : signingReturnTo.safeParse(req.body.returnTo);
+  if (returnToResult && !returnToResult.success) throw new AppError(400, 'Invalid signing return path.');
   const user = await User.findOne({ email, emailVerified: false });
   if (user) {
     const token = randomToken();
     user.verificationTokenHash = hashToken(token);
     user.verificationExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000);
     await user.save();
-    const link = clientPage(`verify-email?token=${encodeURIComponent(token)}`);
+    const returnToQuery = returnToResult?.data ? `&returnTo=${encodeURIComponent(returnToResult.data)}` : '';
+    const link = clientPage(`verify-email?token=${encodeURIComponent(token)}${returnToQuery}`);
     await sendEmail({ to: user.email, subject: 'Verify your Contracts ZAR account', html: emailHtml('Verify your account.', link), text: `Verify your account: ${link}` });
   }
   res.json({ message: 'If that account needs verification, a link has been sent.' });
