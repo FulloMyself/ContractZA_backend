@@ -118,9 +118,17 @@ router.get('/users', asyncHandler(async (req, res) => {
   }
   const [users, total] = await Promise.all([
     User.find(filter).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit)
-      .select('firstName lastName email role status emailVerified createdAt lastLoginAt').lean(),
+      .select('firstName lastName email mobile alternatePhone residentialAddress postalAddress postalSameAsResidential role status emailVerified createdAt lastLoginAt').lean(),
     User.countDocuments(filter)
   ]);
+  await writeAudit({
+    actor: req.user._id,
+    action: 'admin.user_contact_details_viewed',
+    targetType: 'userDirectory',
+    fields: ['name', 'email', 'mobile', 'alternatePhone', 'residentialAddress', 'postalAddress'],
+    metadata: { page, limit },
+    ipAddress: req.ip
+  });
   res.json({ users, page, limit, total, pages: Math.ceil(total / limit) });
 }));
 
