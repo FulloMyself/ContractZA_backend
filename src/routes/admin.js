@@ -7,6 +7,7 @@ const Contract = require('../models/Contract');
 const AuditLog = require('../models/AuditLog');
 const RefreshToken = require('../models/RefreshToken');
 const CorrectionRequest = require('../models/CorrectionRequest');
+const ComplaintCase = require('../models/ComplaintCase');
 const { authenticate, requireRole } = require('../middleware/auth');
 const { objectIdParam } = require('../middleware/objectIdParam');
 const { asyncHandler, AppError } = require('../utils/errors');
@@ -20,17 +21,90 @@ router.param('id', objectIdParam);
 router.use(authenticate, requireRole('admin'));
 
 router.get('/stats', asyncHandler(async (req, res) => {
-  const [users, contracts, pendingCorrections, recentActivity] = await Promise.all([
+  const [users, contracts, pendingCorrections, openComplaints, recentActivity] = await Promise.all([
     User.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]),
     Contract.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]),
     CorrectionRequest.countDocuments({ status: 'pending' }),
+    ComplaintCase.countDocuments({ status: { $ne: 'closed' } }),
     AuditLog.countDocuments({ createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } })
   ]);
   res.json({
     users: Object.fromEntries(users.map(({ _id, count }) => [_id, count])),
     contracts: Object.fromEntries(contracts.map(({ _id, count }) => [_id, count])),
-    pendingCorrections, recentActivity
+    pendingCorrections, openComplaints, recentActivity
   });
+}));
+
+router.get('/complaints', asyncHandler(async (req, res) => {
+  const page = Math.max(1, Number.parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(50, Math.max(1, Number.parseInt(req.query.limit, 10) || 20));
+  const filter = {};
+  if (['submitted', 'awaiting_response', 'under_review', 'referred', 'closed'].includes(req.query.status)) {
+    filter.status = req.query.status;
+  }
+  const [cases, total] = await Promise.all([
+    ComplaintCase.find(filter).select('-messages').sort({ updatedAt: -1 })
+      .skip((page - 1) * limit).limit(limit).lean(),
+    ComplaintCase.countDocuments(filter)
+  ]);
+  res.json({ cases, page, limit, total, pages: Math.ceil(total / limit) });
+}));
+
+router.get('/complaints/:id', asyncHandler(async (req, res) => {
+  const caseRecord = await ComplaintCase.findById(req.params.id).lean();
+  if (!caseRecord) throw new AppError(404, 'Complaint case not found.');
+  res.json({ case: caseRecord });
+}));
+
+router.patch('/complaints/:id/status', asyncHandler(async (req, res) => {
+  const parsed = z.object({
+    status: z.enum(['submitted', 'awaiting_response', 'under_review', 'referred', 'closed'])
+  }).strict().safeParse(req.body);
+  if (!parsed.success) throw new AppError(400, 'Choose a valid complaint case status.');
+  const caseRecord = await ComplaintCase.findById(req.params.id);
+  if (!caseRecord) throw new AppError(404, 'Complaint case not found.');
+  if (caseRecord.status === 'closed' && parsed.data.status !== 'closed') {
+    throw new AppError(409, 'Closed cases cannot be reopened. The parties may submit a new complaint if needed.');
+  }
+  caseRecord.status = parsed.data.status;
+  caseRecord.statusUpdatedAt = new Date();
+  await caseRecord.save();
+  await writeAudit({
+    actor: req.user._id,
+    action: 'admin.complaint_status_updated',
+    targetType: 'complaintCase',
+    targetId: String(caseRecord._id),
+    fields: ['status'],
+    metadata: { status: caseRecord.status },
+    ipAddress: req.ip
+  });
+  res.json({ case: caseRecord });
+}));
+
+router.post('/complaints/:id/messages', asyncHandler(async (req, res) => {
+  const parsed = z.object({ body: z.string().trim().min(1).max(5000) }).strict().safeParse(req.body);
+  if (!parsed.success) throw new AppError(400, 'A response of up to 5,000 characters is required.');
+  const caseRecord = await ComplaintCase.findById(req.params.id);
+  if (!caseRecord) throw new AppError(404, 'Complaint case not found.');
+  if (caseRecord.status === 'closed') throw new AppError(409, 'This case is closed and no longer accepts responses.');
+  if (caseRecord.messages.length >= 100) throw new AppError(409, 'This case has reached its response limit.');
+  caseRecord.messages.push({
+    author: req.user._id,
+    authorName: `${req.user.firstName} ${req.user.lastName}`,
+    authorEmail: req.user.email,
+    authorRole: 'admin',
+    body: parsed.data.body
+  });
+  await caseRecord.save();
+  await writeAudit({
+    actor: req.user._id,
+    action: 'admin.complaint_response_added',
+    targetType: 'complaintCase',
+    targetId: String(caseRecord._id),
+    fields: ['response'],
+    ipAddress: req.ip
+  });
+  res.json({ case: caseRecord });
 }));
 
 router.get('/users', asyncHandler(async (req, res) => {
@@ -67,12 +141,15 @@ router.delete('/users/:id', asyncHandler(async (req, res) => {
   const user = await User.findById(req.params.id);
   if (!user) throw new AppError(404, 'User not found.');
   if (user.id === req.user.id || user.role === 'admin') throw new AppError(400, 'Administrator accounts cannot be deleted here.');
-  await writeAudit({ actor: req.user._id, action: 'admin.user_deletion_started', targetType: 'user', targetId: String(user._id), fields: ['account', 'contracts'], ipAddress: req.ip });
+  await writeAudit({ actor: req.user._id, action: 'admin.user_deletion_started', targetType: 'user', targetId: String(user._id), fields: ['account', 'contracts', 'complaintCases'], ipAddress: req.ip });
   await Contract.deleteMany({ owner: user._id });
+  await ComplaintCase.deleteMany({
+    $or: [{ complainantEmail: user.email }, { respondentEmail: user.email }]
+  });
   await RefreshToken.deleteMany({ user: user._id });
   await CorrectionRequest.deleteMany({ user: user._id });
   await user.deleteOne();
-  await writeAudit({ actor: req.user._id, action: 'admin.user_deleted', targetType: 'user', targetId: String(user._id), fields: ['account', 'contracts'], ipAddress: req.ip });
+  await writeAudit({ actor: req.user._id, action: 'admin.user_deleted', targetType: 'user', targetId: String(user._id), fields: ['account', 'contracts', 'complaintCases'], ipAddress: req.ip });
   res.json({ message: 'User and their data deleted.' });
 }));
 
