@@ -144,12 +144,6 @@ router.post('/login', asyncHandler(async (req, res) => {
   const family = randomToken();
   await setRefreshCookie(res, user, req, family);
   await writeAudit({ actor: user._id, action: 'auth.login', targetType: 'user', targetId: String(user._id), ipAddress: req.ip });
-  await sendEmail({
-    to: user.email,
-    subject: 'New sign-in to your Contracts ZAR account',
-    html: '<p>A new sign-in to your Contracts ZAR account was successful. If this was not you, change your password immediately.</p>',
-    text: 'A new sign-in to your Contracts ZAR account was successful. If this was not you, change your password immediately.'
-  });
   res.json({ accessToken: createAccessToken(user), user: { id: user.id, firstName: user.firstName, lastName: user.lastName, email: user.email, role: user.role } });
 }));
 

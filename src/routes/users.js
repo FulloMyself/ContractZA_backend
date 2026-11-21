@@ -9,7 +9,7 @@ const { authenticate, requireRole } = require('../middleware/auth');
 const { objectIdParam } = require('../middleware/objectIdParam');
 const { asyncHandler, AppError } = require('../utils/errors');
 const { writeAudit } = require('../services/audit.service');
-const { sendEmail, emailHtml } = require('../services/email');
+const { sendEmail, emailHtml, sendProfileUpdatedNotice } = require('../services/email');
 const { randomToken, hashToken, encryptId, maskId } = require('../utils/crypto');
 const { validateSAId } = require('../utils/saId');
 const config = require('../config/env');
@@ -104,6 +104,7 @@ router.patch('/me', asyncHandler(async (req, res) => {
     if (field === 'mobile' || field === 'alternatePhone') req.user[field] = normalizePhone(value);
     else req.user[field] = value;
   }
+  const profileChanged = req.user.isModified();
   await req.user.save();
   await writeAudit({ actor: req.user._id, action: 'profile.updated', targetType: 'user', targetId: String(req.user._id), fields, ipAddress: req.ip });
   if (emailChange) {
@@ -111,7 +112,12 @@ router.patch('/me', asyncHandler(async (req, res) => {
     await sendEmail({ to: emailChange.pending, subject: 'Confirm your new email address', html: emailHtml('Confirm this address to update your Contracts ZAR account.', link), text: `Confirm your email: ${link}` });
     await sendEmail({ to: emailChange.old, subject: 'Email change requested', html: '<p>A request was made to change the email address on your account.</p>', text: 'A request was made to change the email address on your account.' });
   }
-  res.json({ user: profileResponse(req.user), message: emailChange ? 'Profile updated. Confirm the new email address to activate it.' : 'Profile updated.' });
+  const notificationResult = profileChanged && !emailChange ? await sendProfileUpdatedNotice(req.user) : { failedCount: 0 };
+  res.json({
+    user: profileResponse(req.user),
+    message: emailChange ? 'Profile updated. Confirm the new email address to activate it.' : 'Profile updated.',
+    ...(notificationResult.failedCount > 0 && { notificationWarning: 'Profile Settings were saved, but the update notification email could not be sent.' })
+  });
 }));
 
 router.patch('/me/password', asyncHandler(async (req, res) => {

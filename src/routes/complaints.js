@@ -9,6 +9,7 @@ const { authenticate, requireRole } = require('../middleware/auth');
 const { objectIdParam } = require('../middleware/objectIdParam');
 const { asyncHandler, AppError } = require('../utils/errors');
 const { writeAudit } = require('../services/audit.service');
+const { sendComplaintCreatedNotifications } = require('../services/email');
 
 const router = express.Router();
 router.param('id', objectIdParam);
@@ -103,7 +104,11 @@ router.post('/', asyncHandler(async (req, res) => {
     ipAddress: req.ip
   });
   await markViewed(req.user, 'complaint', caseRecord);
-  res.status(201).json({ case: caseRecord });
+  const notificationResult = await sendComplaintCreatedNotifications(caseRecord);
+  res.status(201).json({
+    case: caseRecord,
+    ...(notificationResult.failedCount > 0 && { notificationWarning: 'The case was created, but some email notifications could not be sent.' })
+  });
 }));
 
 router.get('/:id', asyncHandler(async (req, res) => {

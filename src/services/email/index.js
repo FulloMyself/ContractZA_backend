@@ -2,6 +2,7 @@
 
 const config = require('../../config/env');
 const User = require('../../models/User');
+const { clientPage } = require('../../utils/urls');
 
 async function sendEmail({ to, subject, html, text }) {
   const safeSubject = String(subject).replace(/[\r\n]+/g, ' ').slice(0, 200);
@@ -55,6 +56,71 @@ function emailHtml(message, link, expiration = '24 hours') {
   return `<p>${escapeHtml(message)}</p><p><a href="${escapeHtml(link)}">Continue to Contracts ZAR</a></p><p>This link expires in ${escapeHtml(expiration)}. If you did not request this, ignore this email.</p>`;
 }
 
+async function deliverNotifications(notifications, event) {
+  const results = await Promise.allSettled(notifications.map(({ to, subject, html, text }) => sendEmail({ to, subject, html, text })));
+  let failedCount = 0;
+  results.forEach((result, index) => {
+    if (result.status === 'rejected') {
+      failedCount += 1;
+      console.error(`Failed to send ${event} email`, {
+        recipientType: notifications[index].recipientType,
+        error: result.reason
+      });
+    }
+  });
+  return { failedCount };
+}
+
+async function sendProfileUpdatedNotice(user) {
+  if (user.notifications?.email === false) return { failedCount: 0 };
+  const link = clientPage('profile');
+  return deliverNotifications([{
+    to: user.email,
+    recipientType: 'account-owner',
+    subject: 'Your Contracts ZAR Profile Settings were updated',
+    html: `<p>Your Contracts ZAR Profile Settings were updated.</p><p><a href="${escapeHtml(link)}">Review your Profile Settings</a></p><p>If you did not make this change, sign in and contact support.</p>`,
+    text: `Your Contracts ZAR Profile Settings were updated. Review them here: ${link}. If you did not make this change, sign in and contact support.`
+  }], 'profile update');
+}
+
+async function sendComplaintCreatedNotifications(caseRecord) {
+  const partyEmails = [...new Set([caseRecord.complainantEmail, caseRecord.respondentEmail])];
+  const [partyUsers, admins] = await Promise.all([
+    User.find({ email: { $in: partyEmails } }).select('email notifications').lean(),
+    User.find({ role: 'admin', status: 'active', emailVerified: true }).select('email notifications').lean()
+  ]);
+  const partyByEmail = new Map(partyUsers.map((user) => [user.email, user]));
+  const notifications = new Map();
+  const caseId = String(caseRecord._id);
+  const title = escapeHtml(caseRecord.contractTitle);
+  const subject = escapeHtml(caseRecord.subject);
+  for (const [email, label] of [[caseRecord.complainantEmail, 'reporter'], [caseRecord.respondentEmail, 'other-party']]) {
+    const preferences = partyByEmail.get(email)?.notifications;
+    if (preferences?.email === false || preferences?.contractUpdates === false) continue;
+    const link = clientPage(`complaints/${encodeURIComponent(caseId)}`);
+    const isReporter = label === 'reporter';
+    notifications.set(email, {
+      to: email,
+      recipientType: label,
+      subject: isReporter ? `Your contract dispute was submitted: ${caseRecord.subject}` : `A contract dispute was opened: ${caseRecord.subject}`,
+      html: `<p>${isReporter ? 'Your contract dispute report has been submitted.' : 'A contract dispute report has been opened involving you as a party.'}</p><p><strong>Contract:</strong> ${title}<br><strong>Case:</strong> ${subject}<br><strong>Reference:</strong> ${escapeHtml(caseId)}</p><p><a href="${escapeHtml(link)}">View the case and respond</a></p><p>Contracts ZAR helps parties communicate and does not determine legal liability. If you do not have an account, sign up using this email address to access the case.</p>`,
+      text: `${isReporter ? 'Your contract dispute report has been submitted.' : 'A contract dispute report has been opened involving you as a party.'}\nContract: ${caseRecord.contractTitle}\nCase: ${caseRecord.subject}\nReference: ${caseId}\nView the case and respond: ${link}\nContracts ZAR helps parties communicate and does not determine legal liability. If you do not have an account, sign up using this email address to access the case.`
+    });
+  }
+  for (const admin of admins) {
+    if (admin.notifications?.email === false || admin.notifications?.contractUpdates === false) continue;
+    const link = clientPage(`admin/complaints/${encodeURIComponent(caseId)}`);
+    notifications.set(admin.email, {
+      to: admin.email,
+      recipientType: 'admin',
+      subject: `New contract dispute submitted: ${caseRecord.subject}`,
+      html: `<p>A new contract dispute has been submitted for platform review.</p><p><strong>Contract:</strong> ${title}<br><strong>Case:</strong> ${subject}<br><strong>Reference:</strong> ${escapeHtml(caseId)}</p><p><a href="${escapeHtml(link)}">Review the case</a></p><p>Administrators support communication and do not determine legal liability. Contract documents are not available in the admin case view.</p>`,
+      text: `A new contract dispute has been submitted for platform review.\nContract: ${caseRecord.contractTitle}\nCase: ${caseRecord.subject}\nReference: ${caseId}\nReview the case: ${link}\nAdministrators support communication and do not determine legal liability. Contract documents are not available in the admin case view.`
+    });
+  }
+  return deliverNotifications([...notifications.values()], 'complaint');
+}
+
 async function sendSignatureConfirmation(contract) {
   const uniqueEmails = [...new Set(contract.parties.map((party) => party.email))];
   const title = escapeHtml(contract.title);
@@ -71,4 +137,10 @@ async function sendSignatureConfirmation(contract) {
   })));
 }
 
-module.exports = { sendEmail, emailHtml, sendSignatureConfirmation };
+module.exports = {
+  sendEmail,
+  emailHtml,
+  sendProfileUpdatedNotice,
+  sendComplaintCreatedNotifications,
+  sendSignatureConfirmation
+};
