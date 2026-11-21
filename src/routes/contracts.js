@@ -16,7 +16,7 @@ const { clientPage } = require('../utils/urls');
 const config = require('../config/env');
 const ComplaintCase = require('../models/ComplaintCase');
 const ReadReceipt = require('../models/ReadReceipt');
-const { markViewed, countUnread, ensureTrackingStartedAt } = require('../services/readReceipts');
+const { markViewed, countUnread, countAwaitingResponse, ensureTrackingStartedAt } = require('../services/readReceipts');
 
 const router = express.Router();
 router.param('id', objectIdParam);
@@ -75,7 +75,8 @@ router.get('/stats', asyncHandler(async (req, res) => {
   await expireStaleInvitations(req.user._id);
   const accessFilter = accessibleContracts(req.user);
   const baseline = await ensureTrackingStartedAt(req.user);
-  const [counts, recent, pending, unreadContracts, unreadComplaints] = await Promise.all([
+  const complaintFilter = { $or: [{ complainantEmail: req.user.email }, { respondentEmail: req.user.email }] };
+  const [counts, recent, pending, unreadContracts, unreadComplaints, awaitingResponseComplaints] = await Promise.all([
     Contract.aggregate([{ $match: accessFilter }, { $group: { _id: '$status', count: { $sum: 1 } } }]),
     Contract.find(accessFilter).sort({ updatedAt: -1 }).limit(5).select('title status updatedAt owner'),
     Contract.countDocuments({ ...accessFilter, status: 'pending' }),
@@ -84,15 +85,17 @@ router.get('/stats', asyncHandler(async (req, res) => {
       Model: ComplaintCase,
       user: req.user,
       resourceType: 'complaint',
-      filter: { $or: [{ complainantEmail: req.user.email }, { respondentEmail: req.user.email }] },
+      filter: complaintFilter,
       baseline
-    })
+    }),
+    countAwaitingResponse({ Model: ComplaintCase, user: req.user, role: 'user', filter: complaintFilter })
   ]);
   res.json({
     stats: Object.fromEntries(counts.map(({ _id, count }) => [_id, count])),
     pendingSignatures: pending,
     unreadContracts,
     unreadComplaints,
+    awaitingResponseComplaints,
     recent: recent.map((contract) => ({
       _id: contract._id,
       title: contract.title,

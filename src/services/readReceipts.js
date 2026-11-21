@@ -72,4 +72,19 @@ async function countUnread({ Model, user, resourceType, filter, baseline }) {
   return result?.count || 0;
 }
 
-module.exports = { markViewed, countUnread, ensureTrackingStartedAt };
+async function countAwaitingResponse({ Model, user, role, filter }) {
+  const [result] = await Model.aggregate([
+    { $match: { $and: [filter, { status: { $ne: 'closed' } }] } },
+    { $addFields: { latestMessage: { $arrayElemAt: ['$messages', -1] } } },
+    { $match: { latestMessage: { $exists: true } } },
+    {
+      $match: role === 'admin'
+        ? { 'latestMessage.authorRole': 'user' }
+        : { 'latestMessage.author': { $ne: user._id } }
+    },
+    { $count: 'count' }
+  ]);
+  return result?.count || 0;
+}
+
+module.exports = { markViewed, countUnread, countAwaitingResponse, ensureTrackingStartedAt };

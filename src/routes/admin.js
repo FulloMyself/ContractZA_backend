@@ -9,7 +9,7 @@ const RefreshToken = require('../models/RefreshToken');
 const CorrectionRequest = require('../models/CorrectionRequest');
 const ComplaintCase = require('../models/ComplaintCase');
 const ReadReceipt = require('../models/ReadReceipt');
-const { markViewed, countUnread, ensureTrackingStartedAt } = require('../services/readReceipts');
+const { markViewed, countUnread, countAwaitingResponse, ensureTrackingStartedAt } = require('../services/readReceipts');
 const { authenticate, requireRole } = require('../middleware/auth');
 const { objectIdParam } = require('../middleware/objectIdParam');
 const { asyncHandler, AppError } = require('../utils/errors');
@@ -24,18 +24,19 @@ router.use(authenticate, requireRole('admin'));
 
 router.get('/stats', asyncHandler(async (req, res) => {
   const baseline = await ensureTrackingStartedAt(req.user);
-  const [users, contracts, pendingCorrections, openComplaints, unreadComplaints, recentActivity] = await Promise.all([
+  const [users, contracts, pendingCorrections, openComplaints, unreadComplaints, awaitingResponseComplaints, recentActivity] = await Promise.all([
     User.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]),
     Contract.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]),
     CorrectionRequest.countDocuments({ status: 'pending' }),
     ComplaintCase.countDocuments({ status: { $ne: 'closed' } }),
     countUnread({ Model: ComplaintCase, user: req.user, resourceType: 'complaint', filter: {}, baseline }),
+    countAwaitingResponse({ Model: ComplaintCase, user: req.user, role: 'admin', filter: {} }),
     AuditLog.countDocuments({ createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } })
   ]);
   res.json({
     users: Object.fromEntries(users.map(({ _id, count }) => [_id, count])),
     contracts: Object.fromEntries(contracts.map(({ _id, count }) => [_id, count])),
-    pendingCorrections, openComplaints, unreadComplaints, recentActivity
+    pendingCorrections, openComplaints, unreadComplaints, awaitingResponseComplaints, recentActivity
   });
 }));
 
