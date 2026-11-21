@@ -8,6 +8,8 @@ const AuditLog = require('../models/AuditLog');
 const RefreshToken = require('../models/RefreshToken');
 const CorrectionRequest = require('../models/CorrectionRequest');
 const ComplaintCase = require('../models/ComplaintCase');
+const ReadReceipt = require('../models/ReadReceipt');
+const { markViewed, countUnread, ensureTrackingStartedAt } = require('../services/readReceipts');
 const { authenticate, requireRole } = require('../middleware/auth');
 const { objectIdParam } = require('../middleware/objectIdParam');
 const { asyncHandler, AppError } = require('../utils/errors');
@@ -21,17 +23,19 @@ router.param('id', objectIdParam);
 router.use(authenticate, requireRole('admin'));
 
 router.get('/stats', asyncHandler(async (req, res) => {
-  const [users, contracts, pendingCorrections, openComplaints, recentActivity] = await Promise.all([
+  const baseline = await ensureTrackingStartedAt(req.user);
+  const [users, contracts, pendingCorrections, openComplaints, unreadComplaints, recentActivity] = await Promise.all([
     User.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]),
     Contract.aggregate([{ $group: { _id: '$status', count: { $sum: 1 } } }]),
     CorrectionRequest.countDocuments({ status: 'pending' }),
     ComplaintCase.countDocuments({ status: { $ne: 'closed' } }),
+    countUnread({ Model: ComplaintCase, user: req.user, resourceType: 'complaint', filter: {}, baseline }),
     AuditLog.countDocuments({ createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } })
   ]);
   res.json({
     users: Object.fromEntries(users.map(({ _id, count }) => [_id, count])),
     contracts: Object.fromEntries(contracts.map(({ _id, count }) => [_id, count])),
-    pendingCorrections, openComplaints, recentActivity
+    pendingCorrections, openComplaints, unreadComplaints, recentActivity
   });
 }));
 
@@ -53,6 +57,7 @@ router.get('/complaints', asyncHandler(async (req, res) => {
 router.get('/complaints/:id', asyncHandler(async (req, res) => {
   const caseRecord = await ComplaintCase.findById(req.params.id).lean();
   if (!caseRecord) throw new AppError(404, 'Complaint case not found.');
+  await markViewed(req.user, 'complaint', caseRecord);
   res.json({ case: caseRecord });
 }));
 
@@ -69,6 +74,7 @@ router.patch('/complaints/:id/status', asyncHandler(async (req, res) => {
   caseRecord.status = parsed.data.status;
   caseRecord.statusUpdatedAt = new Date();
   await caseRecord.save();
+  await markViewed(req.user, 'complaint', caseRecord);
   await writeAudit({
     actor: req.user._id,
     action: 'admin.complaint_status_updated',
@@ -96,6 +102,7 @@ router.post('/complaints/:id/messages', asyncHandler(async (req, res) => {
     body: parsed.data.body
   });
   await caseRecord.save();
+  await markViewed(req.user, 'complaint', caseRecord);
   await writeAudit({
     actor: req.user._id,
     action: 'admin.complaint_response_added',
@@ -150,10 +157,25 @@ router.delete('/users/:id', asyncHandler(async (req, res) => {
   if (!user) throw new AppError(404, 'User not found.');
   if (user.id === req.user.id || user.role === 'admin') throw new AppError(400, 'Administrator accounts cannot be deleted here.');
   await writeAudit({ actor: req.user._id, action: 'admin.user_deletion_started', targetType: 'user', targetId: String(user._id), fields: ['account', 'contracts', 'complaintCases'], ipAddress: req.ip });
-  await Contract.deleteMany({ owner: user._id });
-  await ComplaintCase.deleteMany({
+  const [contracts, complaintCases] = await Promise.all([
+    Contract.find({ owner: user._id }).select('_id').lean(),
+    ComplaintCase.find({
     $or: [{ complainantEmail: user.email }, { respondentEmail: user.email }]
-  });
+    }).select('_id').lean()
+  ]);
+  const contractIds = contracts.map((contract) => contract._id);
+  const complaintIds = complaintCases.map((caseRecord) => caseRecord._id);
+  await Promise.all([
+    Contract.deleteMany({ _id: { $in: contractIds } }),
+    ComplaintCase.deleteMany({ _id: { $in: complaintIds } }),
+    ReadReceipt.deleteMany({ user: user._id }),
+    ReadReceipt.deleteMany({
+      $or: [
+        { resourceType: 'contract', resourceId: { $in: contractIds } },
+        { resourceType: 'complaint', resourceId: { $in: complaintIds } }
+      ]
+    })
+  ]);
   await RefreshToken.deleteMany({ user: user._id });
   await CorrectionRequest.deleteMany({ user: user._id });
   await user.deleteOne();

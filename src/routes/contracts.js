@@ -14,6 +14,9 @@ const { signCounterparty } = require('../services/signature.service');
 const { documentHash, signatureImage } = require('../utils/signature');
 const { clientPage } = require('../utils/urls');
 const config = require('../config/env');
+const ComplaintCase = require('../models/ComplaintCase');
+const ReadReceipt = require('../models/ReadReceipt');
+const { markViewed, countUnread, ensureTrackingStartedAt } = require('../services/readReceipts');
 
 const router = express.Router();
 router.param('id', objectIdParam);
@@ -71,14 +74,25 @@ router.use(authenticate, requireRole('user'));
 router.get('/stats', asyncHandler(async (req, res) => {
   await expireStaleInvitations(req.user._id);
   const accessFilter = accessibleContracts(req.user);
-  const [counts, recent, pending] = await Promise.all([
+  const baseline = await ensureTrackingStartedAt(req.user);
+  const [counts, recent, pending, unreadContracts, unreadComplaints] = await Promise.all([
     Contract.aggregate([{ $match: accessFilter }, { $group: { _id: '$status', count: { $sum: 1 } } }]),
     Contract.find(accessFilter).sort({ updatedAt: -1 }).limit(5).select('title status updatedAt owner'),
-    Contract.countDocuments({ ...accessFilter, status: 'pending' })
+    Contract.countDocuments({ ...accessFilter, status: 'pending' }),
+    countUnread({ Model: Contract, user: req.user, resourceType: 'contract', filter: accessFilter, baseline }),
+    countUnread({
+      Model: ComplaintCase,
+      user: req.user,
+      resourceType: 'complaint',
+      filter: { $or: [{ complainantEmail: req.user.email }, { respondentEmail: req.user.email }] },
+      baseline
+    })
   ]);
   res.json({
     stats: Object.fromEntries(counts.map(({ _id, count }) => [_id, count])),
     pendingSignatures: pending,
+    unreadContracts,
+    unreadComplaints,
     recent: recent.map((contract) => ({
       _id: contract._id,
       title: contract.title,
@@ -143,6 +157,7 @@ router.get('/:id/pdf', asyncHandler(async (req, res) => {
 router.get('/:id', asyncHandler(async (req, res) => {
   const contract = await Contract.findOne({ _id: req.params.id, ...accessibleContracts(req.user) });
   if (!contract) throw new AppError(404, 'Contract not found.');
+  await markViewed(req.user, 'contract', contract);
   res.json({ contract: safeContract(contract, isOwner(contract, req.user)) });
 }));
 
@@ -154,6 +169,7 @@ router.patch('/:id', asyncHandler(async (req, res) => {
   if (contract.status !== 'draft' || contract.signatures.length) throw new AppError(409, 'Only unsigned draft contracts can be edited.');
   Object.assign(contract, parsed.data);
   await contract.save();
+  await markViewed(req.user, 'contract', contract);
   await writeAudit({ actor: req.user._id, action: 'contract.updated', targetType: 'contract', targetId: String(contract._id), fields: Object.keys(parsed.data), ipAddress: req.ip });
   res.json({ contract: safeContract(contract, true) });
 }));
@@ -163,6 +179,7 @@ router.delete('/:id', asyncHandler(async (req, res) => {
   if (!contract) throw new AppError(404, 'Contract not found.');
   if (!['draft', 'cancelled'].includes(contract.status)) throw new AppError(409, 'Only draft or cancelled contracts can be deleted.');
   await contract.deleteOne();
+  await ReadReceipt.deleteMany({ resourceType: 'contract', resourceId: contract._id });
   await writeAudit({ actor: req.user._id, action: 'contract.deleted', targetType: 'contract', targetId: String(contract._id), ipAddress: req.ip });
   res.json({ message: 'Contract deleted.' });
 }));
@@ -187,6 +204,7 @@ router.post('/:id/invite', asyncHandler(async (req, res) => {
   contract.bodyHash = documentHash(contract.body);
   contract.status = 'pending';
   await contract.save();
+  await markViewed(req.user, 'contract', contract);
   const link = clientPage(`sign/${encodeURIComponent(token)}`);
   await sendEmail({
     to: parsed.data.email, subject: `Signature requested: ${contract.title}`,
@@ -204,6 +222,7 @@ router.post('/:id/cancel', asyncHandler(async (req, res) => {
   contract.status = 'cancelled';
   for (const party of contract.parties) party.signingTokenHash = undefined;
   await contract.save();
+  await markViewed(req.user, 'contract', contract);
   await writeAudit({ actor: req.user._id, action: 'contract.cancelled', targetType: 'contract', targetId: String(contract._id), fields: ['status'], ipAddress: req.ip });
   res.json({ message: 'Contract cancelled.' });
 }));
@@ -241,6 +260,8 @@ router.post('/:id/sign', asyncHandler(async (req, res) => {
     signedContract.signedAt = completedAt;
     await sendSignatureConfirmation(signedContract);
   }
+  const viewedContract = await Contract.findById(signedContract._id).select('_id updatedAt');
+  await markViewed(req.user, 'contract', viewedContract);
   await writeAudit({ actor: req.user._id, action: 'contract.owner_signed', targetType: 'contract', targetId: String(contract._id), ipAddress: req.ip });
   res.json({ contract: safeContract(signedContract, true) });
 }));

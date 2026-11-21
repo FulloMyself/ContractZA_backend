@@ -5,6 +5,7 @@ const { AppError } = require('../utils/errors');
 const { documentHash } = require('../utils/signature');
 const { writeAudit } = require('./audit.service');
 const { sendSignatureConfirmation } = require('./email');
+const { markViewed } = require('./readReceipts');
 
 async function signCounterparty({ contract, request, name, signature, partyMatch }) {
   const bodyHash = documentHash(contract.body);
@@ -52,6 +53,8 @@ async function signCounterparty({ contract, request, name, signature, partyMatch
     await sendSignatureConfirmation(signedContract);
   }
 
+  const viewedContract = await Contract.findById(signedContract._id).select('_id updatedAt');
+  await markViewed(request.user, 'contract', viewedContract);
   await writeAudit({
     actor: request.user._id,
     action: 'contract.counterparty_signed',

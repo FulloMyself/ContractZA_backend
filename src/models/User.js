@@ -45,6 +45,7 @@ const userSchema = new mongoose.Schema({
     email: { type: Boolean, default: true },
     contractUpdates: { type: Boolean, default: true }
   },
+  unreadTrackingStartedAt: Date,
   status: { type: String, enum: ['active', 'suspended'], default: 'active' },
   failedLoginAttempts: { type: Number, default: 0 },
   lockedUntil: Date,

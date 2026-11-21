@@ -4,6 +4,7 @@ const express = require('express');
 const { z } = require('zod');
 const Contract = require('../models/Contract');
 const ComplaintCase = require('../models/ComplaintCase');
+const { markViewed } = require('../services/readReceipts');
 const { authenticate, requireRole } = require('../middleware/auth');
 const { objectIdParam } = require('../middleware/objectIdParam');
 const { asyncHandler, AppError } = require('../utils/errors');
@@ -101,12 +102,14 @@ router.post('/', asyncHandler(async (req, res) => {
     metadata: { contractId: String(contract._id) },
     ipAddress: req.ip
   });
+  await markViewed(req.user, 'complaint', caseRecord);
   res.status(201).json({ case: caseRecord });
 }));
 
 router.get('/:id', asyncHandler(async (req, res) => {
   const caseRecord = await ComplaintCase.findById(req.params.id);
   if (!caseRecord || !isParticipant(caseRecord, req.user)) throw new AppError(404, 'Complaint case not found.');
+  await markViewed(req.user, 'complaint', caseRecord);
   res.json({ case: caseRecord });
 }));
 
@@ -119,6 +122,7 @@ router.post('/:id/messages', asyncHandler(async (req, res) => {
   if (caseRecord.messages.length >= 100) throw new AppError(409, 'This case has reached its response limit.');
   addMessage(caseRecord, req.user, parsed.data.body);
   await caseRecord.save();
+  await markViewed(req.user, 'complaint', caseRecord);
   await writeAudit({
     actor: req.user._id,
     action: 'complaint.response_added',
