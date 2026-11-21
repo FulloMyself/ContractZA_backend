@@ -121,6 +121,46 @@ async function sendComplaintCreatedNotifications(caseRecord) {
   return deliverNotifications([...notifications.values()], 'complaint');
 }
 
+async function sendComplaintResponseNotifications(caseRecord, response) {
+  const partyEmails = [...new Set([caseRecord.complainantEmail, caseRecord.respondentEmail])];
+  const [partyUsers, admins] = await Promise.all([
+    User.find({ email: { $in: partyEmails } }).select('email notifications').lean(),
+    User.find({ role: 'admin', status: 'active', emailVerified: true }).select('email notifications').lean()
+  ]);
+  const partyByEmail = new Map(partyUsers.map((user) => [user.email, user]));
+  const notifications = new Map();
+  const caseId = String(caseRecord._id);
+  const title = escapeHtml(caseRecord.contractTitle);
+  const subject = escapeHtml(caseRecord.subject);
+  const author = escapeHtml(response.authorName);
+
+  for (const [email, recipientType] of [[caseRecord.complainantEmail, 'reporter'], [caseRecord.respondentEmail, 'other-party']]) {
+    const preferences = partyByEmail.get(email)?.notifications;
+    if (preferences?.email === false || preferences?.contractUpdates === false) continue;
+    const link = clientPage(`complaints/${encodeURIComponent(caseId)}`);
+    notifications.set(email, {
+      to: email,
+      recipientType,
+      subject: `New response in contract dispute: ${caseRecord.subject}`,
+      html: `<p>${author} added a response to a contract dispute involving you.</p><p><strong>Contract:</strong> ${title}<br><strong>Case:</strong> ${subject}<br><strong>Reference:</strong> ${escapeHtml(caseId)}</p><p><a href="${escapeHtml(link)}">Sign in to view the case and respond</a></p><p>The response is not included in this email. Contracts ZAR records communications and does not determine legal liability.</p>`,
+      text: `${response.authorName} added a response to a contract dispute involving you.\nContract: ${caseRecord.contractTitle}\nCase: ${caseRecord.subject}\nReference: ${caseId}\nSign in to view the case and respond: ${link}\nThe response is not included in this email. Contracts ZAR records communications and does not determine legal liability.`
+    });
+  }
+
+  for (const admin of admins) {
+    if (admin.notifications?.email === false || admin.notifications?.contractUpdates === false) continue;
+    const link = clientPage(`admin/complaints/${encodeURIComponent(caseId)}`);
+    notifications.set(admin.email, {
+      to: admin.email,
+      recipientType: 'admin',
+      subject: `Complaint response updated: ${caseRecord.subject}`,
+      html: `<p>${author} added a response to a contract dispute case.</p><p><strong>Contract:</strong> ${title}<br><strong>Case:</strong> ${subject}<br><strong>Reference:</strong> ${escapeHtml(caseId)}</p><p><a href="${escapeHtml(link)}">Review the case</a></p><p>The response is not included in this email. Administrators support communication and do not determine legal liability or access contract documents.</p>`,
+      text: `${response.authorName} added a response to a contract dispute case.\nContract: ${caseRecord.contractTitle}\nCase: ${caseRecord.subject}\nReference: ${caseId}\nReview the case: ${link}\nThe response is not included in this email. Administrators support communication and do not determine legal liability or access contract documents.`
+    });
+  }
+  return deliverNotifications([...notifications.values()], 'complaint response');
+}
+
 async function sendSignatureConfirmation(contract) {
   const uniqueEmails = [...new Set(contract.parties.map((party) => party.email))];
   const title = escapeHtml(contract.title);
@@ -142,5 +182,6 @@ module.exports = {
   emailHtml,
   sendProfileUpdatedNotice,
   sendComplaintCreatedNotifications,
+  sendComplaintResponseNotifications,
   sendSignatureConfirmation
 };

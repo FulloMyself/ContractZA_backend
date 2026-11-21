@@ -9,7 +9,7 @@ const { authenticate, requireRole } = require('../middleware/auth');
 const { objectIdParam } = require('../middleware/objectIdParam');
 const { asyncHandler, AppError } = require('../utils/errors');
 const { writeAudit } = require('../services/audit.service');
-const { sendComplaintCreatedNotifications } = require('../services/email');
+const { sendComplaintCreatedNotifications, sendComplaintResponseNotifications } = require('../services/email');
 
 const router = express.Router();
 router.param('id', objectIdParam);
@@ -136,7 +136,11 @@ router.post('/:id/messages', asyncHandler(async (req, res) => {
     fields: ['response'],
     ipAddress: req.ip
   });
-  res.json({ case: caseRecord });
+  const notificationResult = await sendComplaintResponseNotifications(caseRecord, caseRecord.messages.at(-1));
+  res.json({
+    case: caseRecord,
+    ...(notificationResult.failedCount > 0 && { notificationWarning: 'The response was saved, but some email notifications could not be sent.' })
+  });
 }));
 
 module.exports = router;
