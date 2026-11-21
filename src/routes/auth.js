@@ -190,7 +190,9 @@ router.post('/logout', asyncHandler(async (req, res) => {
 }));
 
 router.post('/forgot-password', asyncHandler(async (req, res) => {
-  const user = await User.findOne({ email: String(req.body.email || '').toLowerCase().trim() });
+  const parsed = emailField.safeParse(req.body.email);
+  if (!parsed.success) throw new AppError(400, 'Enter a valid email address.');
+  const user = await User.findOne({ email: parsed.data });
   if (user) {
     const token = randomToken();
     user.resetTokenHash = hashToken(token);
