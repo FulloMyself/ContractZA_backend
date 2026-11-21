@@ -3,11 +3,16 @@
 const app = require('./app');
 const connectDatabase = require('./config/db');
 const config = require('./config/env');
+const { startSigningReminderWorker } = require('./services/signingReminders');
 
 async function start() {
   await connectDatabase();
   const server = app.listen(config.port, () => console.log(`Contracts ZAR API listening on port ${config.port}`));
-  const shutdown = () => server.close(() => process.exit(0));
+  const stopReminderWorker = startSigningReminderWorker();
+  const shutdown = () => {
+    stopReminderWorker();
+    server.close(() => process.exit(0));
+  };
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
 }

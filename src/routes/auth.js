@@ -16,7 +16,7 @@ const config = require('../config/env');
 const router = express.Router();
 const passwordField = z.string().min(10, 'Password must be at least 10 characters.').max(128);
 const emailField = z.string().email().max(254).transform((value) => value.toLowerCase().trim());
-const signingReturnTo = z.string().regex(/^\/sign\/[a-f0-9]{64}$/i);
+const signingReturnTo = z.string().regex(/^\/(?:sign\/[a-f0-9]{64}|contracts\/[a-f0-9]{24})$/i);
 const registrationSchema = z.object({
   firstName: z.string().trim().min(1).max(80),
   lastName: z.string().trim().min(1).max(80),

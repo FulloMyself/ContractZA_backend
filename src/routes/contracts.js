@@ -20,6 +20,13 @@ const { markViewed, countUnread, countAwaitingResponse, ensureTrackingStartedAt 
 
 const router = express.Router();
 router.param('id', objectIdParam);
+const reminderSettingsInput = z.object({
+  signingDeadline: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
+  renewalDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).nullable(),
+  remindersEnabled: z.boolean(),
+  reminderDaysBefore: z.array(z.number().int().refine((value) => [1, 3, 7].includes(value))).max(3),
+  overdueSigningReminderEnabled: z.boolean()
+}).strict();
 const contractInput = z.object({
   title: z.string().trim().min(1).max(160),
   body: z.string().trim().min(1).max(100000),
@@ -32,6 +39,16 @@ const contractInput = z.object({
   ]).optional()
 }).strict();
 const emailSchema = z.string().email().max(254).transform((value) => value.toLowerCase().trim());
+
+function parseReminderDate(value) {
+  if (!value) return null;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  return Number.isNaN(date.getTime()) || date.toISOString().slice(0, 10) !== value ? undefined : date;
+}
+
+function utcDateKey(date) {
+  return date.toISOString().slice(0, 10);
+}
 
 function safeContract(contract, owner = false) {
   const result = contract.toObject ? contract.toObject() : contract;
@@ -76,6 +93,8 @@ router.get('/stats', asyncHandler(async (req, res) => {
   const accessFilter = accessibleContracts(req.user);
   const baseline = await ensureTrackingStartedAt(req.user);
   const complaintFilter = { $or: [{ complainantEmail: req.user.email }, { respondentEmail: req.user.email }] };
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
   const [counts, recent, pending, unreadContracts, unreadComplaints, awaitingResponseComplaints] = await Promise.all([
     Contract.aggregate([{ $match: accessFilter }, { $group: { _id: '$status', count: { $sum: 1 } } }]),
     Contract.find(accessFilter).sort({ updatedAt: -1 }).limit(5).select('title status updatedAt owner'),
@@ -90,12 +109,27 @@ router.get('/stats', asyncHandler(async (req, res) => {
     }),
     countAwaitingResponse({ Model: ComplaintCase, user: req.user, role: 'user', filter: complaintFilter })
   ]);
+  const [signatureDeadlines, renewalDeadlines] = await Promise.all([
+    Contract.find({ $and: [accessFilter, { status: 'pending' }, { signingDeadline: { $gte: today } }] })
+      .sort({ signingDeadline: 1 }).limit(5).select('_id title signingDeadline'),
+    Contract.find({ $and: [accessFilter, { status: 'signed' }, { renewalDate: { $gte: today } }] })
+      .sort({ renewalDate: 1 }).limit(5).select('_id title renewalDate')
+  ]);
+  const upcomingDeadlines = [
+    ...signatureDeadlines.map((contract) => ({
+      _id: contract._id, title: contract.title, type: 'signing', date: contract.signingDeadline
+    })),
+    ...renewalDeadlines.map((contract) => ({
+      _id: contract._id, title: contract.title, type: 'renewal', date: contract.renewalDate
+    }))
+  ].sort((a, b) => a.date - b.date).slice(0, 5);
   res.json({
     stats: Object.fromEntries(counts.map(({ _id, count }) => [_id, count])),
     pendingSignatures: pending,
     unreadContracts,
     unreadComplaints,
     awaitingResponseComplaints,
+    upcomingDeadlines,
     recent: recent.map((contract) => ({
       _id: contract._id,
       title: contract.title,
@@ -175,6 +209,49 @@ router.patch('/:id', asyncHandler(async (req, res) => {
   await markViewed(req.user, 'contract', contract);
   await writeAudit({ actor: req.user._id, action: 'contract.updated', targetType: 'contract', targetId: String(contract._id), fields: Object.keys(parsed.data), ipAddress: req.ip });
   res.json({ contract: safeContract(contract, true) });
+}));
+
+router.patch('/:id/reminders', asyncHandler(async (req, res) => {
+  const parsed = reminderSettingsInput.safeParse(req.body);
+  if (!parsed.success) throw new AppError(400, 'Provide valid contract reminder settings.');
+  const contract = await Contract.findOne({ _id: req.params.id, owner: req.user._id });
+  if (!contract) throw new AppError(404, 'Contract not found.');
+  const signingDeadline = parseReminderDate(parsed.data.signingDeadline);
+  const renewalDate = parseReminderDate(parsed.data.renewalDate);
+  if (signingDeadline === undefined || renewalDate === undefined) throw new AppError(400, 'Enter valid calendar dates for the deadlines.');
+  const today = new Date();
+  today.setUTCHours(0, 0, 0, 0);
+  if ([signingDeadline, renewalDate].some((date) => date && date < today)) {
+    throw new AppError(400, 'Deadlines must be today or a future date.');
+  }
+  if (signingDeadline && !['draft', 'pending'].includes(contract.status)) {
+    throw new AppError(409, 'A signing deadline can only be set for a draft or pending contract.');
+  }
+  if (renewalDate && contract.status !== 'signed') {
+    throw new AppError(409, 'A renewal date can only be set after all parties have signed the contract.');
+  }
+  if (parsed.data.remindersEnabled && parsed.data.reminderDaysBefore.length === 0) {
+    throw new AppError(400, 'Choose at least one reminder time or turn reminders off.');
+  }
+  if (parsed.data.reminderDaysBefore.some((day, index, days) => days.indexOf(day) !== index)) {
+    throw new AppError(400, 'Reminder days must be unique.');
+  }
+  contract.signingDeadline = signingDeadline || undefined;
+  contract.renewalDate = renewalDate || undefined;
+  contract.remindersEnabled = parsed.data.remindersEnabled;
+  contract.reminderDaysBefore = parsed.data.reminderDaysBefore;
+  contract.overdueSigningReminderEnabled = parsed.data.overdueSigningReminderEnabled;
+  await contract.save();
+  await markViewed(req.user, 'contract', contract);
+  await writeAudit({
+    actor: req.user._id,
+    action: 'contract.reminders_updated',
+    targetType: 'contract',
+    targetId: String(contract._id),
+    fields: ['signingDeadline', 'renewalDate', 'remindersEnabled', 'reminderDaysBefore', 'overdueSigningReminderEnabled'],
+    ipAddress: req.ip
+  });
+  res.json({ contract: safeContract(contract, true), message: 'Deadline and reminder settings saved.' });
 }));
 
 router.delete('/:id', asyncHandler(async (req, res) => {

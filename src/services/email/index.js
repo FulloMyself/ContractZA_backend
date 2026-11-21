@@ -295,6 +295,7 @@ async function sendSignatureConfirmation(contract) {
 
 module.exports = {
   sendEmail,
+  escapeHtml,
   emailHtml,
   sendProfileUpdatedNotice,
   sendAccountStatusNotice,
