@@ -83,6 +83,21 @@ async function sendProfileUpdatedNotice(user) {
   }], 'profile update');
 }
 
+async function sendAccountStatusNotice(user, status) {
+  if (user.notifications?.email === false || user.notifications?.contractUpdates === false) return { failedCount: 0 };
+  const isSuspended = status === 'suspended';
+  const message = isSuspended
+    ? 'An administrator has suspended your Contracts ZAR account. You will not be able to sign in while it is suspended. Contact platform support if you believe this was a mistake.'
+    : 'An administrator has reactivated your Contracts ZAR account. You can sign in and use the platform again.';
+  return deliverNotifications([{
+    to: user.email,
+    recipientType: 'account-owner',
+    subject: `Your Contracts ZAR account was ${status}`,
+    html: `<p>${escapeHtml(message)}</p>`,
+    text: message
+  }], 'account status');
+}
+
 async function sendComplaintCreatedNotifications(caseRecord) {
   const partyEmails = [...new Set([caseRecord.complainantEmail, caseRecord.respondentEmail])];
   const [partyUsers, admins] = await Promise.all([
@@ -161,6 +176,45 @@ async function sendComplaintResponseNotifications(caseRecord, response) {
   return deliverNotifications([...notifications.values()], 'complaint response');
 }
 
+async function sendComplaintStatusNotifications(caseRecord) {
+  const partyEmails = [...new Set([caseRecord.complainantEmail, caseRecord.respondentEmail])];
+  const partyUsers = await User.find({ email: { $in: partyEmails } }).select('email notifications').lean();
+  const partyByEmail = new Map(partyUsers.map((user) => [user.email, user]));
+  const caseId = String(caseRecord._id);
+  const link = clientPage(`complaints/${encodeURIComponent(caseId)}`);
+  const title = escapeHtml(caseRecord.contractTitle);
+  const subject = escapeHtml(caseRecord.subject);
+  const notifications = [];
+
+  for (const [email, recipientType] of [[caseRecord.complainantEmail, 'reporter'], [caseRecord.respondentEmail, 'other-party']]) {
+    const preferences = partyByEmail.get(email)?.notifications;
+    if (preferences?.email === false || preferences?.contractUpdates === false) continue;
+    const status = escapeHtml(caseRecord.status.replace(/_/g, ' '));
+    notifications.push({
+      to: email,
+      recipientType,
+      subject: `Complaint case status updated: ${caseRecord.subject}`,
+      html: `<p>An administrator updated the status of a complaint case involving you.</p><p><strong>Contract:</strong> ${title}<br><strong>Case:</strong> ${subject}<br><strong>Status:</strong> ${status}<br><strong>Reference:</strong> ${escapeHtml(caseId)}</p><p><a href="${escapeHtml(link)}">Sign in to review the case</a></p><p>Contracts ZAR records the platform workflow and does not determine legal liability.</p>`,
+      text: `An administrator updated the status of a complaint case involving you.\nContract: ${caseRecord.contractTitle}\nCase: ${caseRecord.subject}\nStatus: ${caseRecord.status.replace(/_/g, ' ')}\nReference: ${caseId}\nSign in to review the case: ${link}\nContracts ZAR records the platform workflow and does not determine legal liability.`
+    });
+  }
+  return deliverNotifications(notifications, 'complaint status');
+}
+
+async function sendCorrectionDecisionNotice(user, request) {
+  if (user.notifications?.email === false || user.notifications?.contractUpdates === false) return { failedCount: 0 };
+  const status = request.status;
+  const message = `Your Contracts ZAR identity correction request was ${status}.`;
+  const reviewNote = request.reviewNote ? `<p>Administrator note: ${escapeHtml(request.reviewNote)}</p>` : '';
+  return deliverNotifications([{
+    to: user.email,
+    recipientType: 'account-owner',
+    subject: `Your identity correction request was ${status}`,
+    html: `<p>${escapeHtml(message)}</p>${reviewNote}`,
+    text: `${message}${request.reviewNote ? ` Administrator note: ${request.reviewNote}` : ''}`
+  }], 'correction request');
+}
+
 async function sendSignatureConfirmation(contract) {
   const uniqueEmails = [...new Set(contract.parties.map((party) => party.email))];
   const title = escapeHtml(contract.title);
@@ -181,7 +235,10 @@ module.exports = {
   sendEmail,
   emailHtml,
   sendProfileUpdatedNotice,
+  sendAccountStatusNotice,
   sendComplaintCreatedNotifications,
   sendComplaintResponseNotifications,
+  sendComplaintStatusNotifications,
+  sendCorrectionDecisionNotice,
   sendSignatureConfirmation
 };

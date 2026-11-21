@@ -16,7 +16,12 @@ const { asyncHandler, AppError } = require('../utils/errors');
 const { writeAudit } = require('../services/audit.service');
 const { validateSAId } = require('../utils/saId');
 const { encryptId, decryptId, hashId, maskId } = require('../utils/crypto');
-const { sendEmail, sendComplaintResponseNotifications } = require('../services/email');
+const {
+  sendAccountStatusNotice,
+  sendComplaintResponseNotifications,
+  sendComplaintStatusNotifications,
+  sendCorrectionDecisionNotice
+} = require('../services/email');
 
 const router = express.Router();
 router.param('id', objectIdParam);
@@ -72,6 +77,7 @@ router.patch('/complaints/:id/status', asyncHandler(async (req, res) => {
   if (caseRecord.status === 'closed' && parsed.data.status !== 'closed') {
     throw new AppError(409, 'Closed cases cannot be reopened. The parties may submit a new complaint if needed.');
   }
+  const statusChanged = caseRecord.status !== parsed.data.status;
   caseRecord.status = parsed.data.status;
   caseRecord.statusUpdatedAt = new Date();
   await caseRecord.save();
@@ -85,7 +91,13 @@ router.patch('/complaints/:id/status', asyncHandler(async (req, res) => {
     metadata: { status: caseRecord.status },
     ipAddress: req.ip
   });
-  res.json({ case: caseRecord });
+  const notificationResult = statusChanged
+    ? await sendComplaintStatusNotifications(caseRecord)
+    : { failedCount: 0 };
+  res.json({
+    case: caseRecord,
+    ...(notificationResult.failedCount > 0 && { notificationWarning: 'The complaint status was updated, but some email notifications could not be sent.' })
+  });
 }));
 
 router.post('/complaints/:id/messages', asyncHandler(async (req, res) => {
@@ -150,11 +162,16 @@ router.patch('/users/:id/status', asyncHandler(async (req, res) => {
   const user = await User.findById(req.params.id);
   if (!user) throw new AppError(404, 'User not found.');
   if (user.role === 'admin' && user.id === req.user.id) throw new AppError(400, 'You cannot change your own account status.');
+  const statusChanged = user.status !== parsed.data.status;
   user.status = parsed.data.status;
   await user.save();
   if (user.status === 'suspended') await RefreshToken.updateMany({ user: user._id, revokedAt: null }, { $set: { revokedAt: new Date() } });
   await writeAudit({ actor: req.user._id, action: `admin.user_${user.status}`, targetType: 'user', targetId: String(user._id), fields: ['status'], ipAddress: req.ip });
-  res.json({ message: `User ${user.status}.` });
+  const notificationResult = statusChanged ? await sendAccountStatusNotice(user, user.status) : { failedCount: 0 };
+  res.json({
+    message: `User ${user.status}.`,
+    ...(notificationResult.failedCount > 0 && { notificationWarning: `The account was ${user.status}, but the email notification could not be sent.` })
+  });
 }));
 
 router.delete('/users/:id', asyncHandler(async (req, res) => {
@@ -234,13 +251,11 @@ router.patch('/correction-requests/:id', asyncHandler(async (req, res) => {
   request.reviewNote = parsed.data.reviewNote || '';
   await request.save();
   await writeAudit({ actor: req.user._id, action: `admin.correction_${request.status}`, targetType: 'correctionRequest', targetId: String(request._id), fields: request.requestedFields, ipAddress: req.ip });
-  await sendEmail({
-    to: user.email,
-    subject: `Your identity correction request was ${request.status}`,
-    html: `<p>Your Contracts ZAR identity correction request was ${request.status}.</p>`,
-    text: `Your Contracts ZAR identity correction request was ${request.status}.`
+  const notificationResult = await sendCorrectionDecisionNotice(user, request);
+  res.json({
+    message: `Correction request ${request.status}.`,
+    ...(notificationResult.failedCount > 0 && { notificationWarning: `The correction request was ${request.status}, but the email notification could not be sent.` })
   });
-  res.json({ message: `Correction request ${request.status}.` });
 }));
 
 router.get('/audit-log', asyncHandler(async (req, res) => {
