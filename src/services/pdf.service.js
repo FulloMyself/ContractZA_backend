@@ -24,6 +24,7 @@ function formattedDate(value, options = { dateStyle: 'long' }) {
 
 function drawHeader(doc) {
   const width = doc.page.width;
+  const contentX = doc.x;
   const contentY = doc.y;
   doc.save();
   doc.rect(0, 0, width, 76).fill(COLORS.forestDark);
@@ -38,11 +39,16 @@ function drawHeader(doc) {
     .text('AGREEMENT & SIGNING RECORD', PAGE_MARGIN + 50, 47, { characterSpacing: 1.1 });
   doc.rect(0, 76, width, 3).fill(COLORS.lime);
   doc.restore();
+  doc.x = contentX;
   doc.y = contentY;
 }
 
 function drawFooter(doc, pageNumber, pageCount) {
   const y = doc.page.height - 42;
+  const previousBottomMargin = doc.page.margins.bottom;
+  const contentX = doc.x;
+  const contentY = doc.y;
+  doc.page.margins.bottom = 18;
   doc.save();
   doc.moveTo(PAGE_MARGIN, y).lineTo(doc.page.width - PAGE_MARGIN, y).lineWidth(0.7).strokeColor(COLORS.line).stroke();
   doc.fillColor(COLORS.muted).font('Helvetica').fontSize(8)
@@ -53,6 +59,9 @@ function drawFooter(doc, pageNumber, pageCount) {
     width: 105, align: 'right', lineBreak: false
   });
   doc.restore();
+  doc.page.margins.bottom = previousBottomMargin;
+  doc.x = contentX;
+  doc.y = contentY;
 }
 
 function ensureSpace(doc, height) {
@@ -66,6 +75,7 @@ function drawSectionHeading(doc, heading) {
   doc.roundedRect(PAGE_MARGIN, y + 1, 3, 15, 1.5).fill(COLORS.forest);
   doc.fillColor(COLORS.forest).font('Helvetica-Bold').fontSize(12)
     .text(heading, PAGE_MARGIN + 12, y, { lineBreak: false });
+  doc.x = PAGE_MARGIN;
   doc.y = y + 25;
 }
 
@@ -100,7 +110,9 @@ function drawPartyDetails(doc, contract) {
 function drawSignatureBlocks(doc, contract) {
   drawSectionHeading(doc, 'SIGNATURES');
   doc.fillColor(COLORS.muted).font('Helvetica').fontSize(9)
-    .text('The following signatures were recorded for this agreement.', { lineGap: 2 });
+    .text('The following signatures were recorded for this agreement.', PAGE_MARGIN, doc.y, {
+      width: doc.page.width - PAGE_MARGIN * 2, lineGap: 2
+    });
   doc.moveDown(0.6);
 
   for (const [index, party] of contract.parties.entries()) {
@@ -144,7 +156,7 @@ function drawCompletionCertificate(doc, contract) {
     .text('Certificate of completion', PAGE_MARGIN, doc.y, { lineGap: 4 });
   doc.moveDown(0.5);
   doc.fillColor(COLORS.muted).font('Helvetica').fontSize(9)
-    .text('This certificate records the signing evidence stored by Contracts ZAR for the agreement identified below.', {
+    .text('This certificate records the signing evidence stored by Contracts ZAR for the agreement identified below.', PAGE_MARGIN, doc.y, {
       width: doc.page.width - PAGE_MARGIN * 2, lineGap: 3
     });
 
@@ -223,18 +235,19 @@ function contractPdf(contract) {
     drawHeader(doc);
 
     doc.fillColor(COLORS.ink).font('Helvetica-Bold').fontSize(22)
-      .text(contract.title, { width: doc.page.width - PAGE_MARGIN * 2, lineGap: 3 });
+      .text(contract.title, PAGE_MARGIN, doc.y, { width: doc.page.width - PAGE_MARGIN * 2, lineGap: 3 });
     doc.moveDown(0.4);
     doc.fillColor(COLORS.muted).font('Helvetica').fontSize(9)
-      .text(`Executed agreement  |  Created ${formattedDate(contract.createdAt, { dateStyle: 'medium' })}  |  Completed ${formattedDate(contract.signedAt, { dateStyle: 'medium' })}`, {
+      .text(`Executed agreement  |  Created ${formattedDate(contract.createdAt, { dateStyle: 'medium' })}  |  Completed ${formattedDate(contract.signedAt, { dateStyle: 'medium' })}`, PAGE_MARGIN, doc.y, {
         width: doc.page.width - PAGE_MARGIN * 2, lineGap: 2
       });
 
     drawPartyDetails(doc, contract);
     drawSectionHeading(doc, 'CONTRACT TERMS');
     doc.fillColor(COLORS.ink).font('Helvetica').fontSize(10)
-      .text(contract.body, {
+      .text(contract.body, PAGE_MARGIN, doc.y, {
         width: doc.page.width - PAGE_MARGIN * 2,
+        align: 'justify',
         lineGap: 3,
         paragraphGap: 5,
         continued: false
