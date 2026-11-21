@@ -4,11 +4,73 @@ const config = require('../../config/env');
 const User = require('../../models/User');
 const { clientPage } = require('../../utils/urls');
 
+function getPublicSiteUrl() {
+  return `${config.clientUrl}${config.clientBasePath}/`;
+}
+
+function brandedEmailHtml(content) {
+  const siteUrl = getPublicSiteUrl();
+  const logoUrl = `${siteUrl}favicon.svg`;
+  const styledContent = String(content || '').replace(/<a\b([^>]*)>/gi, (tag, attributes) => {
+    if (/\bstyle\s*=/.test(attributes)) return tag;
+    return `<a${attributes} style="color:#17634b;font-weight:700;text-decoration:underline;">`;
+  });
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="x-apple-disable-message-reformatting">
+    <title>Contracts ZAR</title>
+  </head>
+  <body style="margin:0;padding:0;background-color:#f2f5f3;font-family:Arial,Helvetica,sans-serif;color:#24342d;">
+    <div style="display:none;max-height:0;overflow:hidden;opacity:0;color:transparent;">A notification from Contracts ZAR.</div>
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="background-color:#f2f5f3;">
+      <tr>
+        <td align="center" style="padding:32px 14px;">
+          <table role="presentation" width="600" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:600px;">
+            <tr>
+              <td style="padding:18px 24px;background-color:#153a32;border-radius:12px 12px 0 0;">
+                <a href="${escapeHtml(siteUrl)}" style="display:inline-block;color:#ffffff;text-decoration:none;">
+                  <img src="${escapeHtml(logoUrl)}" width="40" height="40" alt="Contracts ZAR" style="display:inline-block;width:40px;height:40px;margin-right:12px;border:0;border-radius:9px;vertical-align:middle;">
+                  <span style="color:#ffffff;font-family:Arial,Helvetica,sans-serif;font-size:18px;font-weight:700;vertical-align:middle;">Contracts <span style="color:#c9ef74;">ZAR</span></span>
+                </a>
+              </td>
+            </tr>
+            <tr>
+              <td class="email-content" style="padding:30px 28px;background-color:#ffffff;font-size:15px;line-height:1.65;overflow-wrap:anywhere;">
+                ${styledContent}
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:21px 24px;background-color:#edf2ee;border-radius:0 0 12px 12px;color:#607067;font-size:12px;line-height:1.65;">
+                <strong style="color:#264c3b;font-size:13px;">Contracts ZAR</strong><br>
+                Digital tools to prepare, share, sign and retain agreements.<br>
+                A product of Established Media and Enterprises.<br>
+                <a href="${escapeHtml(siteUrl)}" style="color:#17634b;text-decoration:underline;">Visit Contracts ZAR</a>
+                <p style="margin:14px 0 0;">This is an automated notification. Please sign in through the link in this email to review or respond; replies may not be monitored. Complaint communications are not legal advice or a determination of contractual rights.</p>
+                <p style="margin:12px 0 0;color:#7a8880;">(c) ${new Date().getFullYear()} Established Media and Enterprises - Contracts ZAR</p>
+              </td>
+            </tr>
+          </table>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>`;
+}
+
+function brandedEmailText(content) {
+  return `${String(content || '').trim()}\n\nContracts ZAR\nDigital tools to prepare, share, sign and retain agreements.\nA product of Established Media and Enterprises.\nVisit Contracts ZAR: ${getPublicSiteUrl()}\nThis is an automated notification. Please sign in through the link in this email to review or respond; replies may not be monitored. Complaint communications are not legal advice or a determination of contractual rights.\n(c) ${new Date().getFullYear()} Established Media and Enterprises - Contracts ZAR`;
+}
+
 async function sendEmail({ to, subject, html, text }) {
   const safeSubject = String(subject).replace(/[\r\n]+/g, ' ').slice(0, 200);
+  const formattedHtml = brandedEmailHtml(html);
+  const formattedText = brandedEmailText(text);
   if (!config.emailProvider) {
     if (config.nodeEnv === 'production') throw new Error('EMAIL_PROVIDER must be configured in production');
-    console.info(`[development email] to=${to} subject=${safeSubject}\n${text}`);
+    console.info(`[development email] to=${to} subject=${safeSubject}\n${formattedText}`);
     return;
   }
 
@@ -19,7 +81,7 @@ async function sendEmail({ to, subject, html, text }) {
     if (!process.env.RESEND_API_KEY) throw new Error('RESEND_API_KEY is required for Resend');
     endpoint = 'https://api.resend.com/emails';
     headers = { Authorization: `Bearer ${process.env.RESEND_API_KEY}` };
-    payload = { from: config.emailFrom, to: [to], subject: safeSubject, html, text };
+    payload = { from: config.emailFrom, to: [to], subject: safeSubject, html: formattedHtml, text: formattedText };
   } else if (config.emailProvider === 'brevo') {
     if (!process.env.BREVO_API_KEY) throw new Error('BREVO_API_KEY is required for Brevo');
     endpoint = 'https://api.brevo.com/v3/smtp/email';
@@ -28,8 +90,8 @@ async function sendEmail({ to, subject, html, text }) {
       sender: { email: config.emailFrom.match(/<([^>]+)>/)?.[1] || config.emailFrom, name: 'Contracts ZAR' },
       to: [{ email: to }],
       subject: safeSubject,
-      htmlContent: html,
-      textContent: text
+      htmlContent: formattedHtml,
+      textContent: formattedText
     };
   } else {
     throw new Error(`Unsupported EMAIL_PROVIDER: ${config.emailProvider}`);
